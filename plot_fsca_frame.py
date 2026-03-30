@@ -63,7 +63,7 @@ SNOTEL_FONT    = 7
 TITLE_FONT     = 14
 LABEL_FONT     = 11
 FIG_SIZE       = (10, 8)         # inches
-NAN_COLOR      = (0.96, 0.96, 0.86)
+NAN_COLOR      = (1, 1, 1)
 # =========================================================================
 
 # =========================================================================
@@ -692,11 +692,9 @@ def plot_fsca_frame(nc_file=None, shapefile_path=None, mask_file=None,
     # =================================================================
     if fig is None:
         fig, ax = plt.subplots(1, 1, figsize=FIG_SIZE)
-    elif ax is None:
+    else:
         fig.clf()
         ax = fig.add_subplot(111)
-    else:
-        ax.clear()
 
     # Image
     extent_km = [ek[0], ek[1], nk[0], nk[1]]
@@ -787,7 +785,7 @@ def main():
         save_png=args.save_png,
         water_year=args.water_year,
     )
-    plt.show()
+    # plt.show()
 
 
 if __name__ == "__main__":
