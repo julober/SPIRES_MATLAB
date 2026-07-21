@@ -5,12 +5,13 @@ download_clip_animate_fSCA.py — Download, clip, and animate SPIReS fSCA.
 Downloads SPIRES HIST V01 fractional snow covered area (fSCA) data from:
     ftp://dtn.rc.colorado.edu/shares/snow-today/gridded_data/SPIRES_HIST_V01
 
-Clips the data to the Boise River Basin using a user-supplied shapefile,
+Clips the data to the Boise River Basin using a user-supplied clipping geometry,
 reprojects from MODIS sinusoidal to UTM, and creates an MP4 animation
 and/or KMZ (Google Earth overlay) for a user-specified water year.
 
 Usage:
     python download_clip_animate_fSCA.py 2015 BRB_outline.shp
+    python download_clip_animate_fSCA.py 2015 --bbox -116.8 43.2 -115.0 44.4
     python download_clip_animate_fSCA.py 2020 BRB_outline.shp --format both --fps 15
 
     The year argument is the WATER YEAR:
@@ -384,12 +385,20 @@ def main():
         description="Download, clip, and animate SPIReS fSCA for the Boise River Basin.")
     parser.add_argument("water_year", type=int,
                         help="Water year (e.g. 2015 = Oct 2014 – Sep 2015)")
-    parser.add_argument("shapefile", help="Path to basin shapefile (.shp)")
+    parser.add_argument("clip_input", nargs="?", default=None,
+                        help="Path to clipping file (.shp, bbox file, or polygon file)")
+    parser.add_argument("--bbox", nargs=4, type=float, default=None,
+                        metavar=("MIN_X", "MIN_Y", "MAX_X", "MAX_Y"),
+                        help="Numeric clipping bbox values")
     parser.add_argument("--output-dir", default="./spires_output")
     parser.add_argument("--fps", type=int, default=10)
     parser.add_argument("--tile", default="h09v04")
     parser.add_argument("--format", choices=["mp4", "kmz", "both"], default="both")
     args = parser.parse_args()
+    if args.bbox is None and args.clip_input is None:
+        parser.error("Provide either clip_input file path or --bbox MIN_X MIN_Y MAX_X MAX_Y.")
+    if args.bbox is not None and args.clip_input is not None:
+        parser.error("Provide either clip_input or --bbox, not both.")
 
     water_year = args.water_year
     assert 2001 <= water_year <= 2025, "Water year must be 2001-2025"
@@ -404,7 +413,8 @@ def main():
     print("  SPIRES fSCA - Download, Clip, and Animate (Python)")
     print("=" * 66)
     print(f"  Water Year: {water_year}  (Oct 1 {water_year-1} – Sep 30 {water_year})")
-    print(f"  Tile: {tile}  Shapefile: {args.shapefile}  Output: {args.output_dir}")
+    clip_desc = args.clip_input if args.clip_input is not None else f"bbox={args.bbox}"
+    print(f"  Tile: {tile}  Clip: {clip_desc}  Output: {args.output_dir}")
     print("=" * 66)
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -413,8 +423,11 @@ def main():
 
     # STEP 1: Mask
     print("\n[1/4] Basin mask...")
-    shp_stem = Path(args.shapefile).stem
-    mask_file = os.path.join(args.output_dir, f"basin_mask_{shp_stem}_{tile}.npz")
+    if args.clip_input is not None:
+        clip_tag = Path(args.clip_input).stem
+    else:
+        clip_tag = re.sub(r"[^0-9A-Za-z._-]+", "_", "_".join(str(v) for v in args.bbox))
+    mask_file = os.path.join(args.output_dir, f"basin_mask_{clip_tag}_{tile}.npz")
     if os.path.exists(mask_file):
         print(f"  Loading cached mask: {mask_file}")
         mf = np.load(mask_file, allow_pickle=True)
@@ -423,8 +436,11 @@ def main():
             m["all_poly_x_sin"] = list(m["all_poly_x_sin"])
             m["all_poly_y_sin"] = list(m["all_poly_y_sin"])
     else:
-        print("  Building mask from shapefile...")
-        m = build_mask(args.shapefile, h_tile, v_tile)
+        print("  Building mask from clipping input...")
+        if args.bbox is not None:
+            m = build_mask(args.bbox[0], h_tile, v_tile, args.bbox[1], args.bbox[2], args.bbox[3])
+        else:
+            m = build_mask(args.clip_input, h_tile, v_tile)
         np.savez(mask_file, **{k: np.array(v, dtype=object) if isinstance(v, list) else v
                                for k, v in m.items()})
         print(f"  Mask cached: {mask_file}")
