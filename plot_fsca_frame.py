@@ -6,6 +6,7 @@ Two modes of operation:
 
   MODE 1 — Quick look from a single daily netCDF file (standalone):
       python plot_fsca_frame.py SPIRES_HIST_h09v04_MOD09GA061_20150201_V1.0.nc BRB_outline.shp
+      python plot_fsca_frame.py SPIRES_HIST_h09v04_MOD09GA061_20150201_V1.0.nc --bbox -116.8 43.2 -115.0 44.4
 
       # With a cached mask (much faster after first run):
       python plot_fsca_frame.py SPIRES_HIST_h09v04_MOD09GA061_20150201_V1.0.nc \\
@@ -212,17 +213,97 @@ def make_parula_cmap():
 # =====================================================================
 #  Build / load basin mask
 # =====================================================================
-def build_mask(shapefile_path, h_tile=H_TILE, v_tile=V_TILE):
-    """Build basin mask in sinusoidal space from a UTM or geographic shapefile."""
-    if shapefile is None:
-        raise ImportError("pyshp required for shapefile reading:  pip install pyshp")
+def _bbox_to_closed_polygon(min_x, min_y, max_x, max_y):
+    if min_x >= max_x or min_y >= max_y:
+        raise ValueError("Invalid bounding box: require min_x < max_x and min_y < max_y.")
+    return np.array([
+        [min_x, min_y],
+        [max_x, min_y],
+        [max_x, max_y],
+        [min_x, max_y],
+        [min_x, min_y],
+    ], dtype=np.float64)
 
-    sf = shapefile.Reader(shapefile_path)
-    shapes = sf.shapes()
 
-    # Detect if UTM based on coordinate magnitude
-    bbox = shapes[0].bbox
-    is_utm = bbox[0] > 1000
+def _parse_clip_file(path):
+    with open(path, "r", encoding="utf-8") as f:
+        lines = [ln.strip() for ln in f if ln.strip()]
+
+    if not lines:
+        raise ValueError(
+            "Invalid Bounding Box File: File must either contain 4 numbers on one line "
+            "or a closed polygon with matching start and end points.")
+
+    if len(lines) == 1:
+        toks = lines[0].split()
+        if len(toks) != 4:
+            raise ValueError(
+                "Invalid Bounding Box File: single-line bounding box file must contain "
+                "4 space-separated numbers.")
+        try:
+            min_x, min_y, max_x, max_y = [float(v) for v in toks]
+        except ValueError as exc:
+            raise ValueError(
+                "Invalid Bounding Box File: single-line bounding box file must contain "
+                "4 space-separated numbers.") from exc
+        return [_bbox_to_closed_polygon(min_x, min_y, max_x, max_y)]
+
+    coords = []
+    for i, line in enumerate(lines, start=1):
+        toks = line.split()
+        if len(toks) != 2:
+            raise ValueError(
+                f"Invalid Polygon File: line {i} must contain exactly 2 numbers.")
+        try:
+            coords.append([float(toks[0]), float(toks[1])])
+        except ValueError as exc:
+            raise ValueError(
+                f"Invalid Polygon File: line {i} must contain exactly 2 numbers.") from exc
+    poly = np.asarray(coords, dtype=np.float64)
+    if poly.shape[0] < 4:
+        raise ValueError("Invalid Polygon File: polygon file must include at least 4 coordinate lines.")
+    if not np.allclose(poly[0], poly[-1]):
+        raise ValueError(
+            "Invalid Polygon File: polygon must be closed; first and last coordinates must match.")
+    return [poly]
+
+
+def _extract_polygons_xy(clip_input, min_y=None, max_x=None, max_y=None):
+    if isinstance(clip_input, (int, float, np.number)):
+        if min_y is None or max_x is None or max_y is None:
+            raise ValueError(
+                "Numeric clipping input requires four values: min_x min_y max_x max_y.")
+        return [_bbox_to_closed_polygon(float(clip_input), float(min_y), float(max_x), float(max_y))]
+
+    if isinstance(clip_input, (str, Path)):
+        clip_path = Path(clip_input)
+        if not clip_path.exists():
+            raise FileNotFoundError(f"Clip input file not found: {clip_path}")
+        if clip_path.suffix.lower() == ".shp":
+            if shapefile is None:
+                raise ImportError("pyshp required for shapefile reading:  pip install pyshp")
+            sf = shapefile.Reader(str(clip_path))
+            shapes = sf.shapes()
+            out = []
+            for shp in shapes:
+                pts = np.array(shp.points, dtype=np.float64)
+                parts = list(shp.parts) + [len(pts)]
+                for i in range(len(parts) - 1):
+                    out.append(pts[parts[i]:parts[i+1], :2])
+            return out
+        return _parse_clip_file(str(clip_path))
+
+    raise ValueError(
+        "Clipping input must be either a file path or 4 numeric values "
+        "(min_x, min_y, max_x, max_y).")
+
+
+def build_mask(clip_input, h_tile=H_TILE, v_tile=V_TILE, min_y=None, max_x=None, max_y=None):
+    """Build mask in sinusoidal space from shapefile, clip file, or numeric bbox."""
+    polygons_xy = _extract_polygons_xy(clip_input, min_y=min_y, max_x=max_x, max_y=max_y)
+
+    all_xy = np.vstack(polygons_xy)
+    is_utm = np.nanmax(np.abs(all_xy[:, 0])) > 1000
 
     x_origin = -R_EARTH * np.pi + h_tile * TILE_SIZE
     y_origin =  R_EARTH * np.pi / 2 - v_tile * TILE_SIZE
@@ -232,21 +313,17 @@ def build_mask(shapefile_path, h_tile=H_TILE, v_tile=V_TILE):
     all_x = []
     all_y = []
 
-    for shape in shapes:
-        pts = np.array(shape.points)
-        parts = list(shape.parts) + [len(pts)]
-        for i in range(len(parts) - 1):
-            part_pts = pts[parts[i]:parts[i+1]]
-            px, py = part_pts[:, 0], part_pts[:, 1]
-            if is_utm:
-                lat, lon = utm2latlon(px, py, UTM_ZONE)
-            else:
-                lat, lon = py, px
-            sx, sy = latlon2sin(lat, lon)
-            all_poly_x_sin.append(sx)
-            all_poly_y_sin.append(sy)
-            all_x.extend(sx)
-            all_y.extend(sy)
+    for part_pts in polygons_xy:
+        px, py = part_pts[:, 0], part_pts[:, 1]
+        if is_utm:
+            lat, lon = utm2latlon(px, py, UTM_ZONE)
+        else:
+            lat, lon = py, px
+        sx, sy = latlon2sin(lat, lon)
+        all_poly_x_sin.append(sx)
+        all_poly_y_sin.append(sy)
+        all_x.extend(sx)
+        all_y.extend(sy)
 
     all_x = np.array(all_x)
     all_y = np.array(all_y)
@@ -400,7 +477,7 @@ def find_fsca_var(ds):
 # =====================================================================
 #  Main plotting function
 # =====================================================================
-def plot_fsca_frame(nc_file=None, shapefile_path=None, mask_file=None,
+def plot_fsca_frame(nc_file=None, shapefile_path=None, mask_file=None, clip_bbox=None,
                     day_index=0, frame_data=None, frame_date=None,
                     plot_context=None, water_year=0, fig=None, ax=None,
                     visible=True, save_png=None):
@@ -448,8 +525,11 @@ def plot_fsca_frame(nc_file=None, shapefile_path=None, mask_file=None,
             if "all_poly_x_sin" in m and isinstance(m["all_poly_x_sin"], np.ndarray):
                 m["all_poly_x_sin"] = list(m["all_poly_x_sin"])
                 m["all_poly_y_sin"] = list(m["all_poly_y_sin"])
+        elif clip_bbox is not None:
+            print("Building basin mask from numeric bounding box...")
+            m = build_mask(clip_bbox[0], H_TILE, V_TILE, clip_bbox[1], clip_bbox[2], clip_bbox[3])
         elif shapefile_path:
-            print("Building basin mask from shapefile...")
+            print("Building basin mask from clipping input...")
             m = build_mask(shapefile_path)
             # Cache it
             stem = Path(shapefile_path).stem
@@ -458,7 +538,7 @@ def plot_fsca_frame(nc_file=None, shapefile_path=None, mask_file=None,
                                     for k, v in m.items()})
             print(f"Mask cached: {cache}")
         else:
-            raise ValueError("Provide shapefile or mask_file for Mode 1.")
+            raise ValueError("Provide clipping input file, --bbox, or mask_file for Mode 1.")
 
         mask = m["mask"]
         row_min = int(m["row_min"]); row_max = int(m["row_max"])
@@ -766,7 +846,10 @@ def main():
         description="Plot a single day of SPIReS fSCA over the Boise River Basin.")
     parser.add_argument("nc_file", help="Path to SPIRES netCDF file")
     parser.add_argument("shapefile", nargs="?", default=None,
-                        help="Path to basin shapefile (.shp)")
+                        help="Path to clipping file (.shp, bbox file, or polygon file)")
+    parser.add_argument("--bbox", nargs=4, type=float, default=None,
+                        metavar=("MIN_X", "MIN_Y", "MAX_X", "MAX_Y"),
+                        help="Numeric clipping bbox values")
     parser.add_argument("--mask-file", default=None,
                         help="Path to cached mask (.npz)")
     parser.add_argument("--day-index", type=int, default=0,
@@ -776,11 +859,14 @@ def main():
     parser.add_argument("--water-year", type=int, default=0,
                         help="Water year label for the title")
     args = parser.parse_args()
+    if args.bbox is not None and args.shapefile is not None:
+        parser.error("Provide either clipping file path or --bbox, not both.")
 
     fig, ax = plot_fsca_frame(
         nc_file=args.nc_file,
         shapefile_path=args.shapefile,
         mask_file=args.mask_file,
+        clip_bbox=args.bbox,
         day_index=args.day_index,
         save_png=args.save_png,
         water_year=args.water_year,

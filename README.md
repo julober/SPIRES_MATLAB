@@ -63,12 +63,15 @@ Save to PNG:
 ```bash
 python plot_fsca_frame.py SPIRES_HIST_h09v04_MOD09GA061_20150301_V1.0.nc \
        BRB_outline.shp --save-png march1.png
+python plot_fsca_frame.py SPIRES_HIST_h09v04_MOD09GA061_20150301_V1.0.nc \
+       --bbox -116.8 43.2 -115.0 44.4 --save-png march1.png
 ```
 
 ### Python — Full water year animation
 ```bash
 python download_clip_animate_fSCA.py 2015 BRB_outline.shp
 python download_clip_animate_fSCA.py 2020 BRB_outline.shp --format kmz --fps 15
+python download_clip_animate_fSCA.py 2020 --bbox -116.8 43.2 -115.0 44.4 --format kmz --fps 15
 ```
 
 ### MATLAB — Plot a single day
